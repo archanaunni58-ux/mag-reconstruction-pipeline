@@ -1,0 +1,77 @@
+#!/bin/bash
+set -e
+
+# =========================
+# MAG Reconstruction Pipeline
+# =========================
+
+# Step 1: Mapping reads to contigs
+bwa mem -t 24 contigs.fasta SRR1778456_1.fastq.gz SRR1778456_2.fastq.gz | \
+samtools view -@ 4 -bS - | \
+samtools sort -@ 8 -o SRR1778456_sorted.bam
+
+
+# Step 2: Index BAM
+samtools index SRR1778456_sorted.bam
+
+
+# Step 3: Activate environment
+conda activate Basic_protocol_MAG1
+
+
+# Step 4: Generate depth file
+jgi_summarize_bam_contig_depths \
+--outputDepth depth.txt \
+SRR1778456_sorted.bam
+
+
+# Step 5: Binning (MetaBAT2)
+metabat2 \
+-i contigs.fasta \
+-a depth.txt \
+-o bins/bin \
+-m 2000 \
+--minContigDepth 2
+
+
+# Step 6: Quality assessment (CheckM)
+conda activate checkm
+
+checkm lineage_wf bins checkm_out -t 8 -x fa
+
+
+# Step 7: Quality summary
+checkm qa \
+checkm_out/lineage.ms \
+checkm_out \
+-f checkm_quality_summary.tsv \
+--tab_table
+
+
+# Step 8: Filter high-quality MAGs
+awk -F'\t' '{print $1"\t"$12"\t"$13"\t"($12-5*$13)}' checkm_quality_summary.tsv | \
+awk -F'\t' '$2 >= 80 && $3 <= 10 && $4 >= 50' \
+> checkm_quality_summary_80_10_50.tsv
+
+
+# Step 9: Extract HQ MAGs
+mkdir -p HQ_MAGs
+
+for k in $(awk '{print $1}' checkm_quality_summary_80_10_50.tsv); do
+  cp bins/${k}.fa HQ_MAGs/
+done
+
+
+# Step 10: GTDB-Tk setup (run once)
+# wget https://data.gtdb.ecogenomic.org/releases/release214/214.1/auxillary_files/gtdbtk_r214_data.tar.gz
+# tar -xvzf gtdbtk_r214_data.tar.gz
+
+
+# Step 11: Taxonomic classification (GTDB-Tk)
+conda activate gtdbtk
+
+gtdbtk classify_wf \
+--genome_dir HQ_MAGs \
+--out_dir gtdbtk_out \
+--cpus 8 \
+--extension fa
